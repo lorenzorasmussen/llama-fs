@@ -1,38 +1,26 @@
 import json
 import os
-import pathlib
 import queue
-from collections import defaultdict
+import shutil
 from pathlib import Path
 from typing import Optional
-import time
-import shutil  # Add this import at the beginning of your file
 
 import agentops
-import colorama
-import ollama
-import threading
 from asciitree import LeftAligned
 from asciitree.drawing import BOX_LIGHT, BoxStyle
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
-from llama_index.core import SimpleDirectoryReader
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from termcolor import colored
 from watchdog.observers import Observer
 
+from src.config import AGENT_OPS_API_KEY
 from src.loader import get_dir_summaries
 from src.tree_generator import create_file_tree
 from src.watch_utils import Handler
 from src.watch_utils import create_file_tree as create_watch_file_tree
 
-from dotenv import load_dotenv
-load_dotenv()
-
-agentops.init(tags=["llama-fs"],
-              auto_start_session=False)
+agentops.init(api_key=AGENT_OPS_API_KEY, tags=["llama-fs"], auto_start_session=False)
 
 
 class Request(BaseModel):
@@ -65,6 +53,12 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok"}
 
 
 @app.post("/batch")

@@ -7,11 +7,19 @@ import agentops
 import colorama
 import ollama
 import weave
-from groq import AsyncGroq, Groq
+from groq import AsyncGroq
 from llama_index.core import Document, SimpleDirectoryReader
-from llama_index.core.schema import ImageDocument
 from llama_index.core.node_parser import TokenTextSplitter
+from llama_index.core.schema import ImageDocument
 from termcolor import colored
+
+from src.config import (
+    GROQ_API_KEY,
+    IMAGE_MODEL,
+    LLM_MODEL,
+    SUPPORTED_EXTENSIONS,
+)
+from src.prompts import SUMMARIZE_IMAGE_PROMPT, SUMMARIZE_PROMPT
 
 
 @agentops.record_function("get directory summaries")
@@ -45,17 +53,7 @@ def load_documents(path: str):
     reader = SimpleDirectoryReader(
         input_dir=path,
         recursive=True,
-        required_exts=[
-            ".pdf",
-            # ".docx",
-            # ".py",
-            ".txt",
-            # ".md",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            # ".ts",
-        ],
+        required_exts=SUPPORTED_EXTENSIONS,
     )
     splitter = TokenTextSplitter(chunk_size=6144)
     documents = []
@@ -88,29 +86,16 @@ def process_metadata(doc_dicts):
 
 
 async def summarize_document(doc, client):
-    PROMPT = """
-You will be provided with the contents of a file along with its metadata. Provide a summary of the contents. The purpose of the summary is to organize files based on their content. To this end provide a concise but informative summary. Make the summary as specific to the file as possible.
-
-Write your response a JSON object with the following schema:
-
-```json
-{
-    "file_path": "path to the file including name",
-    "summary": "summary of the content"
-}
-```
-""".strip()
-
     max_retries = 5
     attempt = 0
     while attempt < max_retries:
         try:
             chat_completion = client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": PROMPT},
+                    {"role": "system", "content": SUMMARIZE_PROMPT},
                     {"role": "user", "content": json.dumps(doc)},
                 ],
-                model="llama-3.1-70b-versatile",
+                model=LLM_MODEL,
                 response_format={"type": "json_object"},
                 temperature=0,
             )
@@ -135,19 +120,6 @@ Write your response a JSON object with the following schema:
 
 
 async def summarize_image_document(doc: ImageDocument, client):
-    PROMPT = """
-You will be provided with an image along with its metadata. Provide a summary of the image contents. The purpose of the summary is to organize files based on their content. To this end provide a concise but informative summary. Make the summary as specific to the file as possible.
-
-Write your response a JSON object with the following schema:
-
-```json
-{
-    "file_path": "path to the file including name",
-    "summary": "summary of the content"
-}
-```
-""".strip()
-
     client = ollama.AsyncClient()
     chat_completion = await client.chat(
         messages=[
@@ -158,7 +130,7 @@ Write your response a JSON object with the following schema:
                 "images": [doc.image_path],
             },
         ],
-        model="moondream",
+        model=IMAGE_MODEL,
         # format="json",
         # stream=True,
         options={"num_predict": 128},
@@ -187,9 +159,9 @@ async def dispatch_summarize_document(doc, client):
 
 
 async def get_summaries(documents):
-    client = Groq(
-        api_key=os.environ.get("GROQ_API_KEY"),
-    )
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY environment variable not set")
+    client = AsyncGroq(api_key=GROQ_API_KEY)
     summaries = await asyncio.gather(
         *[dispatch_summarize_document(doc, client) for doc in documents]
     )
@@ -214,97 +186,28 @@ def merge_summary_documents(summaries, metadata_list):
     return file_list
 
 
-################################################################################################
-# Non-async versions of the functions                                                        #
-################################################################################################
-
-
-def get_file_summary(path: str):
-    client = Groq(
-        api_key=os.environ.get("GROQ_API_KEY"),
-    )
-    reader = SimpleDirectoryReader(input_files=[path]).iter_data()
-
-    docs = next(reader)
-    splitter = TokenTextSplitter(chunk_size=6144)
-    text = splitter.split_text("\n".join([d.text for d in docs]))[0]
-    doc = Document(text=text, metadata=docs[0].metadata)
-    summary = dispatch_summarize_document_sync(doc, client)
-    return summary
-
-
-def dispatch_summarize_document_sync(doc, client):
-    if isinstance(doc, ImageDocument):
-        return summarize_image_document_sync(doc, client)
-    elif isinstance(doc, Document):
-        return summarize_document_sync({"content": doc.text, **doc.metadata}, client)
-    else:
-        raise ValueError("Document type not supported")
-
-
-def summarize_document_sync(doc, client):
-    PROMPT = """
-You will be provided with the contents of a file along with its metadata. Provide a summary of the contents. The purpose of the summary is to organize files based on their content. To this end provide a concise but informative summary. Make the summary as specific to the file as possible.
-
-Write your response a JSON object with the following schema:
-    
-```json 
-{
-    "file_path": "path to the file including name",
-    "summary": "summary of the content"
-}
-```
-""".strip()
-
-    chat_completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": PROMPT},
-            {"role": "user", "content": json.dumps(doc)},
-        ],
-        model="llama-3.1-70b-versatile",
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
-    summary = json.loads(chat_completion.choices[0].message.content)
+async def get_file_summary(path: str):
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY environment variable not set")
+    client = AsyncGroq(api_key=GROQ_API_KEY)
 
     try:
-        # Print the filename in green
-        print(colored(summary["file_path"], "green"))
-        print(summary["summary"])  # Print the summary of the contents
-        # Print a separator line with spacing for readability
-        print("-" * 80 + "\n")
-    except KeyError as e:
-        print(e)
-        print(summary)
+        docs = next(SimpleDirectoryReader(input_files=[path]).iter_data())
+    except StopIteration:
+        return None  # Or handle as you see fit, e.g., raise an error
 
-    return summary
+    doc_to_summarize = None
+    if not docs:
+        return None
 
+    if isinstance(docs[0], ImageDocument):
+        doc_to_summarize = docs[0]
+    else:
+        splitter = TokenTextSplitter(chunk_size=6144)
+        text_chunks = splitter.split_text("\n".join([d.text for d in docs]))
+        text = text_chunks[0] if text_chunks else ""
+        doc_to_summarize = Document(text=text, metadata=docs[0].metadata)
 
-def summarize_image_document_sync(doc: ImageDocument, client):
-    client = ollama.Client()
-    chat_completion = client.chat(
-        messages=[
-            {
-                "role": "user",
-                "content": "Summarize the contents of this image.",
-                "images": [doc.image_path],
-            },
-        ],
-        model="moondream",
-        # format="json",
-        # stream=True,
-        options={"num_predict": 128},
-    )
-
-    summary = {
-        "file_path": doc.image_path,
-        "summary": chat_completion["message"]["content"],
-    }
-
-    # Print the filename in green
-    print(colored(summary["file_path"], "green"))
-    print(summary["summary"])  # Print the summary of the contents
-    # Print a separator line with spacing for readability
-    print("-" * 80 + "\n")
-
-    return summary
+    if doc_to_summarize:
+        return await dispatch_summarize_document(doc_to_summarize, client)
+    return None
